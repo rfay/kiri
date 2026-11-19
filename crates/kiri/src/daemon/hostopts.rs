@@ -92,7 +92,18 @@ pub fn guest_lines(opts: &Value, net_host: bool) -> Result<Vec<String>, String> 
         out.push(format!("rlimit\t{res}\t{soft}\t{hard}"));
     }
     if !nofile {
-        out.push(format!("rlimit\t7\t{DEFAULT_NOFILE}\t{DEFAULT_NOFILE}"));
+        // Clamp to the engine's own hard limit: in a nested container (e.g. a
+        // userns-remapped Docker) raising past it is refused.
+        let mut n = DEFAULT_NOFILE;
+        #[cfg(target_os = "linux")]
+        {
+            let mut rl = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+            // SAFETY: valid out-pointer.
+            if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl) } == 0 && (rl.rlim_max as u64) < n {
+                n = rl.rlim_max as u64;
+            }
+        }
+        out.push(format!("rlimit\t7\t{n}\t{n}"));
     }
     if let Some(map) = opts["Sysctls"].as_object() {
         for (key, value) in map {

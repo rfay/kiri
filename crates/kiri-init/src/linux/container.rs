@@ -1990,14 +1990,28 @@ fn mount_container_filesystems(privileged: bool, shm_size: u64) -> io::Result<()
         (c"dev/urandom", 1, 9),
         (c"dev/tty", 5, 0),
     ] {
-        if privileged {
+        if privileged && Path::new(&*name.to_string_lossy()).exists() {
             // Copied from the host already.
             continue;
         }
-        sys::mknod(name, libc::S_IFCHR | 0o666, major, minor)?;
-        // mknod applies the umask; every user in the container needs these.
-        // SAFETY: valid NUL-terminated path.
-        unsafe { libc::chmod(name.as_ptr(), 0o666) };
+        match sys::mknod(name, libc::S_IFCHR | 0o666, major, minor) {
+            Ok(()) => {
+                // mknod applies the umask; every user in the container needs these.
+                // SAFETY: valid NUL-terminated path.
+                unsafe { libc::chmod(name.as_ptr(), 0o666) };
+            }
+            Err(e) if e.raw_os_error() == Some(libc::EPERM) || e.kind() == io::ErrorKind::PermissionDenied => {
+                // In a user namespace mknod is refused: bind-mount the host's node, as runc does.
+                let host = CString::new(format!("/{}", name.to_string_lossy())).unwrap();
+                // SAFETY: valid NUL-terminated paths.
+                unsafe {
+                    let fd = libc::open(name.as_ptr(), libc::O_CREAT | libc::O_WRONLY | libc::O_CLOEXEC, 0o666);
+                    if fd >= 0 { libc::close(fd); }
+                }
+                sys::mount(&host, name, c"", libc::MS_BIND, None)?;
+            }
+            Err(e) => return Err(e),
+        }
     }
     for (target, link) in [
         (c"/proc/self/fd", c"dev/fd"),
